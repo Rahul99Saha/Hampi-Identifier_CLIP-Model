@@ -322,7 +322,7 @@ with col_right:
         # Run model
         with st.spinner("🔍 Analysing monument with CLIP…"):
             try:
-                model = get_model()
+                model = get_model(use_enhanced_prompts=True)
                 if not model.is_loaded():
                     st.info("📦 Loading CLIP model (first run — ~1 min)…")
 

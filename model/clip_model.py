@@ -158,11 +158,31 @@ class HampiCLIPModel:
     """
     Zero-shot monument classifier using CLIP.
     Supports prompt ensembling and returns top-k predictions with confidence.
+    
+    Model variants:
+    - "openai/clip-vit-base-patch32": Base model, good speed (default)
+    - "openai/clip-vit-large-patch14": Larger model, better accuracy (~10-15% improvement)
     """
 
-    MODEL_ID = "openai/clip-vit-base-patch32"
-
-    def __init__(self, device: str | None = None):
+    # Model IDs available
+    MODEL_VARIANTS = {
+        "base": "openai/clip-vit-base-patch32",       # 63M params, ViT-B/32
+        "large": "openai/clip-vit-large-patch14",     # 304M params, ViT-L/14 - RECOMMENDED
+    }
+    
+    def __init__(self, model_variant: str = "base", device: str | None = None):
+        """
+        Initialize HAMPI CLIP model.
+        
+        Args:
+            model_variant: "base" (default, faster) or "large" (more accurate)
+            device: "cuda" or "cpu". Auto-detects if None.
+        """
+        if model_variant not in self.MODEL_VARIANTS:
+            raise ValueError(f"Unknown model variant: {model_variant}. Choose from: {list(self.MODEL_VARIANTS.keys())}")
+        
+        self.model_variant = model_variant
+        self.MODEL_ID = self.MODEL_VARIANTS[model_variant]
         self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
         self.model = None
         self.processor = None
@@ -182,17 +202,40 @@ class HampiCLIPModel:
         self.model.eval()
         self._precompute_text_features()
         self._loaded = True
+    
+    def load_with_prompts(self, prompts_file: str = None):
+        """
+        Load model and use specific prompts JSON file.
+        
+        Args:
+            prompts_file: Path to custom prompts.json file. If None, uses default data/prompts.json
+        """
+        if self._loaded:
+            return
+        self.processor = CLIPProcessor.from_pretrained(self.MODEL_ID)
+        self.model = CLIPModel.from_pretrained(self.MODEL_ID).to(self.device)
+        self.model.eval()
+        self._precompute_text_features(prompts_file)
+        self._loaded = True
 
-    def _precompute_text_features(self):
+    def _precompute_text_features(self, custom_prompts_path: str = None):
         """
         Encode all monument text prompts once and cache them.
-        Tries to load prompts from data/prompts.json first; falls back to
-        the hardcoded MONUMENT_PROMPTS dict.
+        Tries to load prompts from:
+        1. custom_prompts_path (if provided)
+        2. data/prompts.json (if exists)
+        3. Falls back to hardcoded MONUMENT_PROMPTS dict
+        
         During inference only image encoding is needed — speeds up prediction.
         """
-        # Try loading prompts from the dataset file
-        prompts_path = os.path.join(_DATA_DIR, "prompts.json")
-        file_prompts = load_prompts_from_file(prompts_path)
+        # Determine which prompts to use
+        prompts_path = None
+        if custom_prompts_path:
+            prompts_path = custom_prompts_path
+        else:
+            prompts_path = os.path.join(_DATA_DIR, "prompts.json")
+        
+        file_prompts = load_prompts_from_file(prompts_path) if prompts_path else None
         active_prompts = file_prompts if file_prompts is not None else MONUMENT_PROMPTS
 
         all_features = {}
@@ -201,15 +244,24 @@ class HampiCLIPModel:
                 inputs = self.processor(
                     text=prompts, return_tensors="pt", padding=True
                 ).to(self.device)
-                feats = self.model.get_text_features(**inputs)  # (n_prompts, 512)
+                # Use the text_model directly
+                text_features = self.model.text_model(
+                    input_ids=inputs["input_ids"],
+                    attention_mask=inputs.get("attention_mask")
+                )
+                # Get last hidden state and apply projection
+                pooled_output = text_features.pooler_output  # (n_prompts, 512 or 768)
+                # Apply the text projection
+                text_embeds = self.model.text_projection(pooled_output)
+                # Normalize
+                text_embeds = text_embeds / text_embeds.norm(dim=-1, keepdim=True)
                 # Ensemble by mean-pooling across prompts
-                feats = feats / feats.norm(dim=-1, keepdim=True)
-                feats = feats.mean(dim=0)  # (512,)
+                feats = text_embeds.mean(dim=0)  # (512 or 768,)
                 feats = feats / feats.norm()
                 all_features[name] = feats
-        # Stack into matrix (n_classes, 512)
+        # Stack into matrix (n_classes, 512 or 768)
         self._text_features_cache = {
-            "matrix": torch.stack(list(all_features.values())),  # (10, 512)
+            "matrix": torch.stack(list(all_features.values())),
             "labels": list(all_features.keys()),
         }
 
@@ -233,7 +285,10 @@ class HampiCLIPModel:
         # Encode image
         inputs = self.processor(images=image, return_tensors="pt").to(self.device)
         with torch.no_grad():
-            img_features = self.model.get_image_features(**inputs)  # (1, 512)
+            image_features = self.model.vision_model(pixel_values=inputs["pixel_values"])
+            # Get pooled output and apply projection
+            pooled_output = image_features.pooler_output  # (1, 768)
+            img_features = self.model.visual_projection(pooled_output)  # (1, 512)
             img_features = img_features / img_features.norm(dim=-1, keepdim=True)
 
         # Cosine similarity with text matrix
@@ -275,8 +330,20 @@ class HampiCLIPModel:
 _model_instance: HampiCLIPModel | None = None
 
 
-def get_model() -> HampiCLIPModel:
+def get_model(use_enhanced_prompts: bool = True) -> HampiCLIPModel:
+    """
+    Get the singleton CLIP model instance.
+    
+    Args:
+        use_enhanced_prompts: If True (default), load enhanced prompts for better accuracy.
+                             If False, use original prompts.
+    
+    Returns:
+        Loaded HampiCLIPModel instance
+    """
     global _model_instance
     if _model_instance is None:
         _model_instance = HampiCLIPModel()
+        enhanced_prompts_path = os.path.join(_DATA_DIR, "prompts.json") if use_enhanced_prompts else None
+        _model_instance.load_with_prompts(enhanced_prompts_path)
     return _model_instance
