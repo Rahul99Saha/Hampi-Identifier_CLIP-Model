@@ -1,19 +1,30 @@
 """
 clip_model.py — CLIP zero-shot monument identifier for Hampi (T12.5)
-Uses openai/clip-vit-base-patch32 with rich text prompts for best accuracy.
+
+Supports three prediction modes:
+  1. Zero-Shot     — Pure CLIP cosine-similarity with prompt ensembling
+  2. Linear Probe  — Logistic Regression trained on frozen CLIP features (light fine-tuning)
+  3. Hybrid        — Weighted blend of Zero-Shot + Linear Probe scores
+
+Run with:
+    from model.clip_model import get_model
+    model = get_model()
+    predictions, latency = model.predict(image, mode="hybrid", ensemble_weight=0.7)
 """
+
+from __future__ import annotations
 
 import json
 import os
-import torch
-import numpy as np
-from PIL import Image
-from transformers import CLIPProcessor, CLIPModel
 import time
+
+import numpy as np
+import torch
+from PIL import Image
+from transformers import CLIPModel, CLIPProcessor
 
 # ---------------------------------------------------------------------------
 # Monument class names and rich CLIP prompt templates
-# Updated to match the new Hampi Zero-Shot CLIP Dataset (10 classes, 120 images)
 # ---------------------------------------------------------------------------
 
 MONUMENT_NAMES = [
@@ -105,11 +116,15 @@ MONUMENT_PROMPTS = {
 }
 
 
+# Prediction modes
+MODE_ZERO_SHOT   = "zero_shot"
+MODE_LINEAR_PROBE = "linear_probe"
+MODE_HYBRID      = "hybrid"
+ALL_MODES = [MODE_ZERO_SHOT, MODE_LINEAR_PROBE, MODE_HYBRID]
+
+
 def load_prompts_from_file(prompts_path: str) -> dict | None:
-    """
-    Load text prompts from a JSON file (e.g., data/prompts.json).
-    Returns None if the file does not exist or cannot be parsed.
-    """
+    """Load text prompts from a JSON file.  Returns None on failure."""
     try:
         with open(prompts_path, "r") as f:
             return json.load(f)
@@ -119,9 +134,6 @@ def load_prompts_from_file(prompts_path: str) -> dict | None:
 
 # ---------------------------------------------------------------------------
 # Folder name ↔ class name mapping
-# The dataset uses folder names with underscores (e.g. "Elephant_Stables",
-# "Queen_s_Bath") but the CLIP class labels use proper names (e.g.
-# "Elephant Stables", "Queen's Bath"). This mapping bridges the two.
 # ---------------------------------------------------------------------------
 
 FOLDER_TO_CLASS = {
@@ -152,35 +164,42 @@ def class_to_folder_name(class_name: str) -> str | None:
 
 # Path to the dataset directory (relative to this file)
 _DATA_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data")
+_MODEL_DIR = os.path.dirname(__file__)
+_PROBE_PATH = os.path.join(_MODEL_DIR, "hampi_classifier.pkl")
 
+
+# ---------------------------------------------------------------------------
+# HampiCLIPModel
+# ---------------------------------------------------------------------------
 
 class HampiCLIPModel:
     """
-    Zero-shot monument classifier using CLIP.
-    Supports prompt ensembling and returns top-k predictions with confidence.
-    
+    Unified Hampi monument classifier supporting three modes:
+
+    ┌──────────────────┬────────────────────────────────────────────────────┐
+    │ Mode             │ Description                                        │
+    ├──────────────────┼────────────────────────────────────────────────────┤
+    │ zero_shot        │ Pure CLIP cosine-similarity + prompt ensembling    │
+    │ linear_probe     │ Logistic Regression on frozen CLIP features        │
+    │ hybrid           │ Weighted blend: w*probe + (1-w)*zero_shot          │
+    └──────────────────┴────────────────────────────────────────────────────┘
+
     Model variants:
     - "openai/clip-vit-base-patch32": Base model, good speed (default)
-    - "openai/clip-vit-large-patch14": Larger model, better accuracy (~10-15% improvement)
+    - "openai/clip-vit-large-patch14": Larger model (untested on this dataset)
     """
 
-    # Model IDs available
     MODEL_VARIANTS = {
-        "base": "openai/clip-vit-base-patch32",       # 63M params, ViT-B/32
-        "large": "openai/clip-vit-large-patch14",     # 304M params, ViT-L/14 - RECOMMENDED
+        "base": "openai/clip-vit-base-patch32",
+        "large": "openai/clip-vit-large-patch14",
     }
-    
+
     def __init__(self, model_variant: str = "base", device: str | None = None):
-        """
-        Initialize HAMPI CLIP model.
-        
-        Args:
-            model_variant: "base" (default, faster) or "large" (more accurate)
-            device: "cuda" or "cpu". Auto-detects if None.
-        """
         if model_variant not in self.MODEL_VARIANTS:
-            raise ValueError(f"Unknown model variant: {model_variant}. Choose from: {list(self.MODEL_VARIANTS.keys())}")
-        
+            raise ValueError(
+                f"Unknown model variant: {model_variant}. "
+                f"Choose from: {list(self.MODEL_VARIANTS.keys())}"
+            )
         self.model_variant = model_variant
         self.MODEL_ID = self.MODEL_VARIANTS[model_variant]
         self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
@@ -188,13 +207,14 @@ class HampiCLIPModel:
         self.processor = None
         self._text_features_cache: dict | None = None
         self._loaded = False
+        self._probe = None          # LinearProbeClassifier, loaded on demand
 
     # ------------------------------------------------------------------
     # Loading
     # ------------------------------------------------------------------
 
     def load(self):
-        """Download / load model weights (cached by HuggingFace hub)."""
+        """Download / load CLIP model weights (HuggingFace cache)."""
         if self._loaded:
             return
         self.processor = CLIPProcessor.from_pretrained(self.MODEL_ID)
@@ -202,14 +222,9 @@ class HampiCLIPModel:
         self.model.eval()
         self._precompute_text_features()
         self._loaded = True
-    
-    def load_with_prompts(self, prompts_file: str = None):
-        """
-        Load model and use specific prompts JSON file.
-        
-        Args:
-            prompts_file: Path to custom prompts.json file. If None, uses default data/prompts.json
-        """
+
+    def load_with_prompts(self, prompts_file: str | None = None):
+        """Load CLIP and use a specific prompts JSON file."""
         if self._loaded:
             return
         self.processor = CLIPProcessor.from_pretrained(self.MODEL_ID)
@@ -218,23 +233,12 @@ class HampiCLIPModel:
         self._precompute_text_features(prompts_file)
         self._loaded = True
 
-    def _precompute_text_features(self, custom_prompts_path: str = None):
+    def _precompute_text_features(self, custom_prompts_path: str | None = None):
         """
         Encode all monument text prompts once and cache them.
-        Tries to load prompts from:
-        1. custom_prompts_path (if provided)
-        2. data/prompts.json (if exists)
-        3. Falls back to hardcoded MONUMENT_PROMPTS dict
-        
-        During inference only image encoding is needed — speeds up prediction.
+        Priority: custom_prompts_path → data/prompts.json → hardcoded MONUMENT_PROMPTS
         """
-        # Determine which prompts to use
-        prompts_path = None
-        if custom_prompts_path:
-            prompts_path = custom_prompts_path
-        else:
-            prompts_path = os.path.join(_DATA_DIR, "prompts.json")
-        
+        prompts_path = custom_prompts_path or os.path.join(_DATA_DIR, "prompts.json")
         file_prompts = load_prompts_from_file(prompts_path) if prompts_path else None
         active_prompts = file_prompts if file_prompts is not None else MONUMENT_PROMPTS
 
@@ -244,68 +248,172 @@ class HampiCLIPModel:
                 inputs = self.processor(
                     text=prompts, return_tensors="pt", padding=True
                 ).to(self.device)
-                # Use the text_model directly
                 text_features = self.model.text_model(
                     input_ids=inputs["input_ids"],
-                    attention_mask=inputs.get("attention_mask")
+                    attention_mask=inputs.get("attention_mask"),
                 )
-                # Get last hidden state and apply projection
-                pooled_output = text_features.pooler_output  # (n_prompts, 512 or 768)
-                # Apply the text projection
+                pooled_output = text_features.pooler_output
                 text_embeds = self.model.text_projection(pooled_output)
-                # Normalize
                 text_embeds = text_embeds / text_embeds.norm(dim=-1, keepdim=True)
-                # Ensemble by mean-pooling across prompts
-                feats = text_embeds.mean(dim=0)  # (512 or 768,)
+                feats = text_embeds.mean(dim=0)
                 feats = feats / feats.norm()
                 all_features[name] = feats
-        # Stack into matrix (n_classes, 512 or 768)
+
         self._text_features_cache = {
             "matrix": torch.stack(list(all_features.values())),
             "labels": list(all_features.keys()),
         }
 
     # ------------------------------------------------------------------
-    # Inference
+    # Linear Probe management
     # ------------------------------------------------------------------
 
-    def predict(self, image: Image.Image, top_k: int = 3) -> list[dict]:
+    def load_probe(self, probe_path: str | None = None) -> bool:
+        """
+        Load the linear probe from disk.  Returns True if successful.
+        """
+        from model.linear_probe import LinearProbeClassifier
+        path = probe_path or _PROBE_PATH
+        if LinearProbeClassifier.exists(path):
+            try:
+                self._probe = LinearProbeClassifier.load(path)
+                return True
+            except Exception:
+                self._probe = None
+        return False
+
+    def has_probe(self) -> bool:
+        """Return True if a trained linear probe is loaded."""
+        return self._probe is not None
+
+    def train_and_save_probe(self, verbose: bool = True) -> "LinearProbeClassifier":
+        """
+        Train a Linear Probe on the train_images/ data and cache it.
+        The CLIP model must already be loaded.
+        """
+        if not self._loaded:
+            self.load()
+        from model.linear_probe import train_linear_probe
+        self._probe = train_linear_probe(self, verbose=verbose)
+        return self._probe
+
+    # ------------------------------------------------------------------
+    # Feature extraction (shared between modes)
+    # ------------------------------------------------------------------
+
+    def _get_image_features(self, image: Image.Image) -> tuple[torch.Tensor, np.ndarray]:
+        """
+        Encode a PIL image with CLIP.
+        Returns (img_tensor (1,D), img_numpy (1,D)).
+        """
+        inputs = self.processor(images=image, return_tensors="pt").to(self.device)
+        with torch.no_grad():
+            vision_out = self.model.vision_model(pixel_values=inputs["pixel_values"])
+            pooled = vision_out.pooler_output
+            img_feats = self.model.visual_projection(pooled)
+            img_feats = img_feats / img_feats.norm(dim=-1, keepdim=True)
+        return img_feats, img_feats.cpu().numpy()
+
+    # ------------------------------------------------------------------
+    # Zero-shot scoring
+    # ------------------------------------------------------------------
+
+    def _zero_shot_scores(self, img_feats: torch.Tensor) -> np.ndarray:
+        """Return softmax probabilities (array of shape (n_classes,)) via CLIP."""
+        text_matrix = self._text_features_cache["matrix"].to(self.device)
+        logit_scale = self.model.logit_scale.exp()
+        logits = (logit_scale * img_feats @ text_matrix.T).squeeze(0)
+        probs = torch.softmax(logits, dim=0).detach().cpu().numpy()
+        return probs
+
+    # ------------------------------------------------------------------
+    # Main predict()
+    # ------------------------------------------------------------------
+
+    def predict(
+        self,
+        image: Image.Image,
+        top_k: int = 3,
+        mode: str = MODE_ZERO_SHOT,
+        ensemble_weight: float = 0.7,
+    ) -> tuple[list[dict], float]:
         """
         Classify a PIL image and return top-k predictions.
 
+        Args:
+            image           : PIL.Image.Image (RGB, any size)
+            top_k           : Number of top predictions to return
+            mode            : "zero_shot" | "linear_probe" | "hybrid"
+            ensemble_weight : (only for "hybrid") weight for probe score.
+                              Final score = w * probe + (1-w) * zero_shot
+                              Range: 0.0 (pure zero-shot) → 1.0 (pure probe)
+
         Returns:
-            List of dicts: [{"name": str, "confidence": float}, ...]
-            Sorted by confidence descending.
+            (results, latency_ms)
+            results: list of dicts:
+              { name, confidence, confidence_pct, rank, source }
         """
         if not self._loaded:
             self.load()
 
+        if mode not in ALL_MODES:
+            raise ValueError(f"mode must be one of {ALL_MODES}, got '{mode}'")
+
         t0 = time.time()
 
-        # Encode image
-        inputs = self.processor(images=image, return_tensors="pt").to(self.device)
-        with torch.no_grad():
-            image_features = self.model.vision_model(pixel_values=inputs["pixel_values"])
-            # Get pooled output and apply projection
-            pooled_output = image_features.pooler_output  # (1, 768)
-            img_features = self.model.visual_projection(pooled_output)  # (1, 512)
-            img_features = img_features / img_features.norm(dim=-1, keepdim=True)
+        # ── Step 1: Extract image features ───────────────────────────
+        img_feats_tensor, img_feats_np = self._get_image_features(image)
 
-        # Cosine similarity with text matrix
-        text_matrix = self._text_features_cache["matrix"].to(self.device)  # (10, 512)
         labels = self._text_features_cache["labels"]
+        n_classes = len(labels)
+        top_k = min(top_k, n_classes)
 
-        # logit_scale learned by CLIP
-        logit_scale = self.model.logit_scale.exp()
-        logits = (logit_scale * img_features @ text_matrix.T).squeeze(0)  # (10,)
+        # ── Step 2: Compute scores based on mode ──────────────────────
+        if mode == MODE_ZERO_SHOT:
+            probs = self._zero_shot_scores(img_feats_tensor)
+            source = "Zero-Shot CLIP"
 
-        # Softmax probabilities
-        probs = torch.softmax(logits, dim=0).detach().cpu().numpy()
+        elif mode == MODE_LINEAR_PROBE:
+            if self._probe is None:
+                # Fall back gracefully to zero-shot if probe unavailable
+                probs = self._zero_shot_scores(img_feats_tensor)
+                source = "Zero-Shot CLIP (probe not available)"
+            else:
+                # Get probe probs in the same label order as CLIP text cache
+                probe_results, _ = self._probe.predict_from_features(img_feats_np, top_k=n_classes)
+                probe_map = {r["name"]: r["confidence"] for r in probe_results}
+                probs = np.array([probe_map.get(lbl, 0.0) for lbl in labels])
+                # Re-normalise so they sum to 1 (they should, but floating point)
+                total = probs.sum()
+                if total > 0:
+                    probs = probs / total
+                source = "Linear Probe (light fine-tuning)"
 
-        latency = (time.time() - t0) * 1000  # ms
+        elif mode == MODE_HYBRID:
+            zs_probs = self._zero_shot_scores(img_feats_tensor)
 
-        # Build top-k results
-        top_k = min(top_k, len(labels))
+            if self._probe is None:
+                probs = zs_probs
+                source = "Zero-Shot CLIP (probe not available)"
+            else:
+                probe_results, _ = self._probe.predict_from_features(img_feats_np, top_k=n_classes)
+                probe_map = {r["name"]: r["confidence"] for r in probe_results}
+                probe_probs = np.array([probe_map.get(lbl, 0.0) for lbl in labels])
+
+                # Normalise probe probs for the classes the probe was trained on
+                total = probe_probs.sum()
+                if total > 0:
+                    probe_probs = probe_probs / total
+
+                w = float(np.clip(ensemble_weight, 0.0, 1.0))
+                probs = w * probe_probs + (1.0 - w) * zs_probs
+                # Final re-normalise
+                total = probs.sum()
+                if total > 0:
+                    probs = probs / total
+                source = f"Hybrid (probe {w:.0%} + zero-shot {1-w:.0%})"
+
+        # ── Step 3: Build top-k results ───────────────────────────────
         top_indices = np.argsort(probs)[::-1][:top_k]
         results = [
             {
@@ -313,10 +421,12 @@ class HampiCLIPModel:
                 "confidence": float(probs[i]),
                 "confidence_pct": f"{probs[i]*100:.1f}%",
                 "rank": rank + 1,
+                "source": source,
             }
             for rank, i in enumerate(top_indices)
         ]
 
+        latency = (time.time() - t0) * 1000
         return results, latency
 
     def is_loaded(self) -> bool:
@@ -332,18 +442,22 @@ _model_instance: HampiCLIPModel | None = None
 
 def get_model(use_enhanced_prompts: bool = True) -> HampiCLIPModel:
     """
-    Get the singleton CLIP model instance.
-    
+    Return the singleton HampiCLIPModel instance (auto-loads on first call).
+
     Args:
-        use_enhanced_prompts: If True (default), load enhanced prompts for better accuracy.
-                             If False, use original prompts.
-    
-    Returns:
-        Loaded HampiCLIPModel instance
+        use_enhanced_prompts: If True, load data/prompts.json (default).
     """
     global _model_instance
     if _model_instance is None:
         _model_instance = HampiCLIPModel()
-        enhanced_prompts_path = os.path.join(_DATA_DIR, "prompts.json") if use_enhanced_prompts else None
+        enhanced_prompts_path = (
+            os.path.join(_DATA_DIR, "prompts.json") if use_enhanced_prompts else None
+        )
         _model_instance.load_with_prompts(enhanced_prompts_path)
     return _model_instance
+
+
+def reset_model_cache():
+    """Force recreation of the model singleton (useful for testing)."""
+    global _model_instance
+    _model_instance = None

@@ -1,0 +1,275 @@
+[
+  {
+    "mode": "zero_shot",
+    "ensemble_weight": null,
+    "n_images": 72,
+    "top1_accuracy": 0.5833333333333334,
+    "top3_accuracy": 0.7777777777777778,
+    "avg_confidence": 0.5960622460891803,
+    "avg_latency_ms": 56.33090933163961,
+    "per_class": {
+      "Lotus Mahal": {
+        "total": 12,
+        "top1_correct": 11,
+        "top3_correct": 11,
+        "top1_acc": 0.9166666666666666,
+        "top3_acc": 0.9166666666666666,
+        "avg_confidence": 0.6133160665631294
+      },
+      "Virupaksha Temple": {
+        "total": 0,
+        "top1_correct": 0,
+        "top3_correct": 0,
+        "top1_acc": 0.0,
+        "top3_acc": 0.0,
+        "avg_confidence": 0.0
+      },
+      "Vittala Temple": {
+        "total": 0,
+        "top1_correct": 0,
+        "top3_correct": 0,
+        "top1_acc": 0.0,
+        "top3_acc": 0.0,
+        "avg_confidence": 0.0
+      },
+      "Elephant Stables": {
+        "total": 12,
+        "top1_correct": 8,
+        "top3_correct": 12,
+        "top1_acc": 0.6666666666666666,
+        "top3_acc": 1.0,
+        "avg_confidence": 0.6339355856180191
+      },
+      "Hampi Bazaar": {
+        "total": 12,
+        "top1_correct": 0,
+        "top3_correct": 4,
+        "top1_acc": 0.0,
+        "top3_acc": 0.3333333333333333,
+        "avg_confidence": 0.40823840722441673
+      },
+      "Zenana Enclosure": {
+        "total": 0,
+        "top1_correct": 0,
+        "top3_correct": 0,
+        "top1_acc": 0.0,
+        "top3_acc": 0.0,
+        "avg_confidence": 0.0
+      },
+      "Royal Centre": {
+        "total": 12,
+        "top1_correct": 3,
+        "top3_correct": 7,
+        "top1_acc": 0.25,
+        "top3_acc": 0.5833333333333334,
+        "avg_confidence": 0.5462810198465983
+      },
+      "Queen's Bath": {
+        "total": 0,
+        "top1_correct": 0,
+        "top3_correct": 0,
+        "top1_acc": 0.0,
+        "top3_acc": 0.0,
+        "avg_confidence": 0.0
+      },
+      "Hemakuta temple hill complex": {
+        "total": 12,
+        "top1_correct": 11,
+        "top3_correct": 12,
+        "top1_acc": 0.9166666666666666,
+        "top3_acc": 1.0,
+        "avg_confidence": 0.5937733774383863
+      },
+      "Monolithic Bull": {
+        "total": 12,
+        "top1_correct": 9,
+        "top3_correct": 10,
+        "top1_acc": 0.75,
+        "top3_acc": 0.8333333333333334,
+        "avg_confidence": 0.780829019844532
+      }
+    }
+  },
+  {
+    "mode": "linear_probe",
+    "ensemble_weight": null,
+    "n_images": 72,
+    "top1_accuracy": 0.6944444444444444,
+    "top3_accuracy": 0.8888888888888888,
+    "avg_confidence": 0.3795650043885656,
+    "avg_latency_ms": 53.06721727053324,
+    "per_class": {
+      "Lotus Mahal": {
+        "total": 12,
+        "top1_correct": 11,
+        "top3_correct": 11,
+        "top1_acc": 0.9166666666666666,
+        "top3_acc": 0.9166666666666666,
+        "avg_confidence": 0.5113046051889093
+      },
+      "Virupaksha Temple": {
+        "total": 0,
+        "top1_correct": 0,
+        "top3_correct": 0,
+        "top1_acc": 0.0,
+        "top3_acc": 0.0,
+        "avg_confidence": 0.0
+      },
+      "Vittala Temple": {
+        "total": 0,
+        "top1_correct": 0,
+        "top3_correct": 0,
+        "top1_acc": 0.0,
+        "top3_acc": 0.0,
+        "avg_confidence": 0.0
+      },
+      "Elephant Stables": {
+        "total": 12,
+        "top1_correct": 10,
+        "top3_correct": 12,
+        "top1_acc": 0.8333333333333334,
+        "top3_acc": 1.0,
+        "avg_confidence": 0.3616682810614311
+      },
+      "Hampi Bazaar": {
+        "total": 12,
+        "top1_correct": 1,
+        "top3_correct": 5,
+        "top1_acc": 0.08333333333333333,
+        "top3_acc": 0.4166666666666667,
+        "avg_confidence": 0.2565312873392145
+      },
+      "Zenana Enclosure": {
+        "total": 0,
+        "top1_correct": 0,
+        "top3_correct": 0,
+        "top1_acc": 0.0,
+        "top3_acc": 0.0,
+        "avg_confidence": 0.0
+      },
+      "Royal Centre": {
+        "total": 12,
+        "top1_correct": 8,
+        "top3_correct": 12,
+        "top1_acc": 0.6666666666666666,
+        "top3_acc": 1.0,
+        "avg_confidence": 0.3718472305731553
+      },
+      "Queen's Bath": {
+        "total": 0,
+        "top1_correct": 0,
+        "top3_correct": 0,
+        "top1_acc": 0.0,
+        "top3_acc": 0.0,
+        "avg_confidence": 0.0
+      },
+      "Hemakuta temple hill complex": {
+        "total": 12,
+        "top1_correct": 8,
+        "top3_correct": 12,
+        "top1_acc": 0.6666666666666666,
+        "top3_acc": 1.0,
+        "avg_confidence": 0.3051601814303444
+      },
+      "Monolithic Bull": {
+        "total": 12,
+        "top1_correct": 12,
+        "top3_correct": 12,
+        "top1_acc": 1.0,
+        "top3_acc": 1.0,
+        "avg_confidence": 0.4708784407383387
+      }
+    }
+  },
+  {
+    "mode": "hybrid",
+    "ensemble_weight": 0.7,
+    "n_images": 72,
+    "top1_accuracy": 0.6944444444444444,
+    "top3_accuracy": 0.8888888888888888,
+    "avg_confidence": 0.4162789861845764,
+    "avg_latency_ms": 53.989926973978676,
+    "per_class": {
+      "Lotus Mahal": {
+        "total": 12,
+        "top1_correct": 11,
+        "top3_correct": 11,
+        "top1_acc": 0.9166666666666666,
+        "top3_acc": 0.9166666666666666,
+        "avg_confidence": 0.5286747639185186
+      },
+      "Virupaksha Temple": {
+        "total": 0,
+        "top1_correct": 0,
+        "top3_correct": 0,
+        "top1_acc": 0.0,
+        "top3_acc": 0.0,
+        "avg_confidence": 0.0
+      },
+      "Vittala Temple": {
+        "total": 0,
+        "top1_correct": 0,
+        "top3_correct": 0,
+        "top1_acc": 0.0,
+        "top3_acc": 0.0,
+        "avg_confidence": 0.0
+      },
+      "Elephant Stables": {
+        "total": 12,
+        "top1_correct": 10,
+        "top3_correct": 12,
+        "top1_acc": 0.8333333333333334,
+        "top3_acc": 1.0,
+        "avg_confidence": 0.41682194748514007
+      },
+      "Hampi Bazaar": {
+        "total": 12,
+        "top1_correct": 1,
+        "top3_correct": 6,
+        "top1_acc": 0.08333333333333333,
+        "top3_acc": 0.5,
+        "avg_confidence": 0.25114925631980295
+      },
+      "Zenana Enclosure": {
+        "total": 0,
+        "top1_correct": 0,
+        "top3_correct": 0,
+        "top1_acc": 0.0,
+        "top3_acc": 0.0,
+        "avg_confidence": 0.0
+      },
+      "Royal Centre": {
+        "total": 12,
+        "top1_correct": 6,
+        "top3_correct": 11,
+        "top1_acc": 0.5,
+        "top3_acc": 0.9166666666666666,
+        "avg_confidence": 0.3799688562409182
+      },
+      "Queen's Bath": {
+        "total": 0,
+        "top1_correct": 0,
+        "top3_correct": 0,
+        "top1_acc": 0.0,
+        "top3_acc": 0.0,
+        "avg_confidence": 0.0
+      },
+      "Hemakuta temple hill complex": {
+        "total": 12,
+        "top1_correct": 11,
+        "top3_correct": 12,
+        "top1_acc": 0.9166666666666666,
+        "top3_acc": 1.0,
+        "avg_confidence": 0.3758082830608598
+      },
+      "Monolithic Bull": {
+        "total": 12,
+        "top1_correct": 11,
+        "top3_correct": 12,
+        "top1_acc": 0.9166666666666666,
+        "top3_acc": 1.0,
+        "avg_confidence": 0.5452508100822187
+      }
+    }
+  }
+]

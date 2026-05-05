@@ -1,6 +1,9 @@
 """
 app.py — Hampi Monument Identifier  |  T12.5
-Streamlit frontend using CLIP zero-shot classification.
+Streamlit frontend supporting three classification modes:
+  1. Zero-Shot CLIP        — Pure cosine similarity with prompt ensembling
+  2. Linear Probe          — Logistic Regression on frozen CLIP features (light fine-tuning)
+  3. Hybrid Ensemble       — Weighted blend of both
 
 Run with:
     streamlit run app.py
@@ -9,14 +12,20 @@ Run with:
 import sys
 import os
 
-# Ensure sibling packages are importable
 sys.path.insert(0, os.path.dirname(__file__))
 
 import streamlit as st
 from PIL import Image
 import time
 
-from model.clip_model import get_model, MONUMENT_NAMES
+from model.clip_model import (
+    get_model,
+    MONUMENT_NAMES,
+    MODE_ZERO_SHOT,
+    MODE_LINEAR_PROBE,
+    MODE_HYBRID,
+)
+from model.linear_probe import LinearProbeClassifier, _PROBE_PATH
 from utils.preprocess import load_image_from_upload, prepare_for_clip, validate_image_quality
 from utils.helpers import (
     get_monument_info,
@@ -36,7 +45,7 @@ st.set_page_config(
     page_title="Hampi Monument Identifier",
     page_icon="🏛️",
     layout="wide",
-    initial_sidebar_state="collapsed",
+    initial_sidebar_state="expanded",
 )
 
 # ──────────────────────────────────────────────
@@ -46,7 +55,6 @@ st.set_page_config(
 st.markdown(
     """
     <style>
-    /* ---- Global ---- */
     @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
     html, body, [class*="css"] { font-family: 'Inter', sans-serif; }
 
@@ -84,6 +92,15 @@ st.markdown(
         letter-spacing: 0.5px;
     }
 
+    /* ---- Mode badge ---- */
+    .mode-badge-zs  { background:#e3f2fd;color:#1565c0;border:1.5px solid #1565c0; }
+    .mode-badge-lp  { background:#e8f5e9;color:#2e7d32;border:1.5px solid #2e7d32; }
+    .mode-badge-hyb { background:#fff3e0;color:#e65100;border:1.5px solid #e65100; }
+    .mode-badge-zs, .mode-badge-lp, .mode-badge-hyb {
+        display:inline-block;padding:3px 12px;border-radius:20px;
+        font-size:0.8rem;font-weight:600;margin-bottom:0.6rem;
+    }
+
     /* ---- Monument result card ---- */
     .result-card {
         background: #fff;
@@ -106,6 +123,17 @@ st.markdown(
         font-size: 0.82rem;
         font-weight: 600;
         margin-top: 6px;
+    }
+    .source-tag {
+        display: inline-block;
+        padding: 2px 10px;
+        border-radius: 12px;
+        font-size: 0.75rem;
+        font-weight: 500;
+        background: #f5f0eb;
+        color: #7a5230;
+        margin-top: 4px;
+        margin-left: 6px;
     }
 
     /* ---- Info card ---- */
@@ -152,13 +180,35 @@ st.markdown(
         gap: 0.6rem;
         margin-bottom: 0.5rem;
     }
-    .top3-label { min-width: 200px; font-size: 0.88rem; font-weight: 500; color: #3d2010; }
+    .top3-label { min-width: 210px; font-size: 0.88rem; font-weight: 500; color: #3d2010; }
     .top3-bar-bg {
         flex: 1; height: 10px; background: #e8d5bb;
         border-radius: 6px; overflow: hidden;
     }
     .top3-bar-fill { height: 100%; border-radius: 6px; }
     .top3-pct { font-size: 0.82rem; color: #7a5230; min-width: 45px; text-align: right; }
+
+    /* ---- Accuracy comparison table ---- */
+    .acc-table {
+        width: 100%;
+        border-collapse: collapse;
+        font-size: 0.88rem;
+        margin-top: 0.8rem;
+    }
+    .acc-table th {
+        background: #5c2d0e;
+        color: #f5d78e;
+        padding: 8px 12px;
+        text-align: left;
+        font-weight: 600;
+    }
+    .acc-table td {
+        padding: 7px 12px;
+        border-bottom: 1px solid #e8d5bb;
+        color: #3d2010;
+    }
+    .acc-table tr:nth-child(even) td { background: #fdf9f4; }
+    .acc-best { font-weight: 700; color: #2e7d32; }
 
     /* ---- Buttons ---- */
     div[data-testid="stButton"] button {
@@ -167,9 +217,7 @@ st.markdown(
     }
 
     /* ---- Upload area ---- */
-    [data-testid="stFileUploader"] {
-        border-radius: 12px;
-    }
+    [data-testid="stFileUploader"] { border-radius: 12px; }
 
     /* ---- Sidebar ---- */
     .stSidebar { background: #fdf6ec; }
@@ -183,6 +231,24 @@ st.markdown(
         padding-top: 1rem;
         border-top: 1px solid #e8d5bb;
     }
+
+    /* ---- Probe training status ---- */
+    .probe-trained {
+        background: #e8f5e9;
+        border-left: 4px solid #2e7d32;
+        border-radius: 8px;
+        padding: 0.6rem 1rem;
+        font-size: 0.85rem;
+        color: #2e7d32;
+    }
+    .probe-missing {
+        background: #fff3e0;
+        border-left: 4px solid #e65100;
+        border-radius: 8px;
+        padding: 0.6rem 1rem;
+        font-size: 0.85rem;
+        color: #e65100;
+    }
     </style>
     """,
     unsafe_allow_html=True,
@@ -192,14 +258,19 @@ st.markdown(
 # Session state init
 # ──────────────────────────────────────────────
 
-if "predictions" not in st.session_state:
-    st.session_state.predictions = None
-if "image_pil" not in st.session_state:
-    st.session_state.image_pil = None
-if "latency" not in st.session_state:
-    st.session_state.latency = None
-if "show_full_history" not in st.session_state:
-    st.session_state.show_full_history = False
+defaults = {
+    "predictions": None,
+    "image_pil": None,
+    "latency": None,
+    "show_full_history": False,
+    "mode": MODE_ZERO_SHOT,
+    "ensemble_weight": 0.7,
+    "probe_trained": LinearProbeClassifier.exists(_PROBE_PATH),
+    "probe_training": False,
+}
+for k, v in defaults.items():
+    if k not in st.session_state:
+        st.session_state[k] = v
 
 # ──────────────────────────────────────────────
 # Hero banner
@@ -211,34 +282,115 @@ st.markdown(
         <div style="font-size:2.8rem;margin-bottom:0.3rem;">🏛️</div>
         <p class="hero-title">Hampi Monument Identifier</p>
         <p class="hero-sub">Upload a photo of any Hampi monument — get instant name, history, and visiting details</p>
-        <span class="hero-badge">🤖 Powered by OpenAI CLIP · Zero-Shot · T12.5</span>
+        <span class="hero-badge">🤖 Powered by OpenAI CLIP · Zero-Shot + Light Fine-Tuning · T12.5</span>
     </div>
     """,
     unsafe_allow_html=True,
 )
 
 # ──────────────────────────────────────────────
-# Sidebar — model info & monument list
+# Sidebar — model config, probe training, monument list
 # ──────────────────────────────────────────────
 
 with st.sidebar:
-    st.markdown("### ℹ️ About")
-    st.markdown(
-        "This app uses **CLIP zero-shot classification** to identify "
-        "monuments at Hampi, a UNESCO World Heritage Site in Karnataka, India."
+    st.markdown("### 🤖 Classification Mode")
+
+    mode_labels = {
+        MODE_ZERO_SHOT:    "🔵 Zero-Shot CLIP",
+        MODE_LINEAR_PROBE: "🟢 Linear Probe (Fine-Tuned)",
+        MODE_HYBRID:       "🟠 Hybrid Ensemble",
+    }
+    selected_mode = st.radio(
+        "Select prediction mode",
+        options=list(mode_labels.keys()),
+        format_func=lambda x: mode_labels[x],
+        index=list(mode_labels.keys()).index(st.session_state.mode),
+        label_visibility="collapsed",
     )
+    st.session_state.mode = selected_mode
+
+    # Mode description
+    mode_descriptions = {
+        MODE_ZERO_SHOT: (
+            "**Zero-Shot CLIP** — No training required. Uses descriptive text prompts "
+            "to match the image via cosine similarity. Accuracy: ~52–58%."
+        ),
+        MODE_LINEAR_PROBE: (
+            "**Linear Probe** — A Logistic Regression trained on frozen CLIP image features "
+            "(light fine-tuning). Requires training data. Best on trained classes."
+        ),
+        MODE_HYBRID: (
+            "**Hybrid Ensemble** — Blends Zero-Shot and Linear Probe scores. "
+            "Use the weight slider to control the balance."
+        ),
+    }
+    st.caption(mode_descriptions[selected_mode])
+
+    if selected_mode == MODE_HYBRID:
+        weight = st.slider(
+            "Probe weight (↑ more fine-tuning, ↓ more zero-shot)",
+            min_value=0.0,
+            max_value=1.0,
+            value=st.session_state.ensemble_weight,
+            step=0.05,
+            format="%.2f",
+        )
+        st.session_state.ensemble_weight = weight
+        st.caption(
+            f"Blending: **{weight:.0%} Linear Probe** + **{1-weight:.0%} Zero-Shot**"
+        )
+
     st.divider()
+
+    # ── Linear Probe training section ──
+    st.markdown("### 🏋️ Linear Probe")
+    probe_exists = LinearProbeClassifier.exists(_PROBE_PATH)
+    st.session_state.probe_trained = probe_exists
+
+    if probe_exists:
+        st.markdown(
+            '<div class="probe-trained">✅ Probe trained &amp; ready</div>',
+            unsafe_allow_html=True,
+        )
+    else:
+        st.markdown(
+            '<div class="probe-missing">⚠️ Probe not trained yet</div>',
+            unsafe_allow_html=True,
+        )
+
+    st.caption(
+        "Training uses 49 images across 6 classes from `data/train_images/`. "
+        "Takes ~30–60 seconds on CPU."
+    )
+
+    if st.button("🚀 Train Linear Probe", use_container_width=True, type="primary"):
+        with st.spinner("⚙️ Extracting CLIP features & training probe…"):
+            try:
+                model = get_model(use_enhanced_prompts=True)
+                if not model.is_loaded():
+                    st.info("📦 Loading CLIP model first (may take ~1 min)…")
+                probe = model.train_and_save_probe(verbose=False)
+                st.session_state.probe_trained = True
+                st.success(f"✅ Probe trained on {len(probe.trained_classes)} classes!")
+                # Reload probe into the model instance
+                model.load_probe()
+            except Exception as e:
+                st.error(f"❌ Training failed: {e}")
+
+    st.divider()
+
+    # ── Monument list ──
     st.markdown("### 🏛️ Supported Monuments")
     for m in sorted(MONUMENT_NAMES):
         st.markdown(f"- {m}")
+
     st.divider()
     st.markdown("### ⚙️ Model")
     st.code("openai/clip-vit-base-patch32", language=None)
-    st.markdown("3-prompt ensemble per monument · Softmax probabilities")
+    st.markdown("10-prompt ensemble per monument · Softmax probabilities")
     st.divider()
     st.markdown(
         "[📂 Dataset: Wikimedia Commons](https://commons.wikimedia.org/wiki/Category:Group_of_monuments_at_Hampi)",
-        unsafe_allow_html=False,
     )
 
 # ──────────────────────────────────────────────
@@ -259,7 +411,6 @@ with col_left:
     )
 
     if uploaded_file is not None:
-        # Load and validate
         try:
             image_pil = load_image_from_upload(uploaded_file)
             quality = validate_image_quality(image_pil)
@@ -268,7 +419,6 @@ with col_left:
                 for w in quality["warnings"]:
                     st.warning(w)
 
-            # Display preview
             st.image(
                 image_pil,
                 caption=f"📷 {uploaded_file.name}  ({image_pil.width}×{image_pil.height}px)",
@@ -276,14 +426,13 @@ with col_left:
             )
 
             st.session_state.image_pil = image_pil
-            st.session_state.predictions = None  # reset on new upload
+            st.session_state.predictions = None
 
         except ValueError as e:
             st.error(f"❌ {e}")
             st.session_state.image_pil = None
 
     else:
-        # Placeholder
         st.markdown(
             """
             <div style="
@@ -306,8 +455,20 @@ with col_left:
             unsafe_allow_html=True,
         )
 
-    # Identify button
     st.markdown("<br>", unsafe_allow_html=True)
+
+    # Mode indicator pill
+    mode_pill_class = {
+        MODE_ZERO_SHOT:    "mode-badge-zs",
+        MODE_LINEAR_PROBE: "mode-badge-lp",
+        MODE_HYBRID:       "mode-badge-hyb",
+    }[st.session_state.mode]
+    mode_pill_text = mode_labels[st.session_state.mode]
+    st.markdown(
+        f'<span class="{mode_pill_class}">{mode_pill_text}</span>',
+        unsafe_allow_html=True,
+    )
+
     identify_clicked = st.button(
         "🔍  Identify Monument",
         type="primary",
@@ -319,15 +480,24 @@ with col_left:
 
 with col_right:
     if identify_clicked and st.session_state.image_pil is not None:
-        # Run model
         with st.spinner("🔍 Analysing monument with CLIP…"):
             try:
                 model = get_model(use_enhanced_prompts=True)
                 if not model.is_loaded():
                     st.info("📦 Loading CLIP model (first run — ~1 min)…")
 
+                # Load probe if needed
+                if st.session_state.mode in (MODE_LINEAR_PROBE, MODE_HYBRID):
+                    if not model.has_probe():
+                        model.load_probe()
+
                 prepared = prepare_for_clip(st.session_state.image_pil)
-                predictions, latency = model.predict(prepared, top_k=3)
+                predictions, latency = model.predict(
+                    prepared,
+                    top_k=3,
+                    mode=st.session_state.mode,
+                    ensemble_weight=st.session_state.ensemble_weight,
+                )
                 st.session_state.predictions = predictions
                 st.session_state.latency = latency
                 st.session_state.show_full_history = False
@@ -336,16 +506,16 @@ with col_right:
                 st.error(f"❌ Prediction failed: {e}")
                 st.session_state.predictions = None
 
-    # ---- Display results ----
+    # ── Display results ──
     if st.session_state.predictions:
         predictions = st.session_state.predictions
         top = predictions[0]
         conf = top["confidence"]
         name = top["name"]
+        source = top.get("source", "CLIP")
 
         info = get_monument_info(name)
 
-        # ── Result card ──
         color = confidence_color(conf)
         label = confidence_label(conf)
         emoji = confidence_emoji(conf)
@@ -357,20 +527,22 @@ with col_right:
                 <span class="confidence-badge" style="background:{color}22;color:{color};border:1.5px solid {color};">
                     {emoji} {label} — {conf*100:.1f}%
                 </span>
+                <span class="source-tag">📡 {source}</span>
             </div>
             """,
             unsafe_allow_html=True,
         )
 
-        # ── Confidence bar for top-3 ──
+        # ── Top-3 predictions bar ──
         st.markdown("##### 📊 Top-3 Predictions")
         bar_html = ""
         for pred in predictions:
             bar_color = confidence_color(pred["confidence"])
             width_pct = pred["confidence"] * 100
+            rank_emoji = "🥇" if pred["rank"] == 1 else "🥈" if pred["rank"] == 2 else "🥉"
             bar_html += f"""
             <div class="top3-row">
-                <span class="top3-label">{'🥇' if pred['rank']==1 else '🥈' if pred['rank']==2 else '🥉'} {pred['name']}</span>
+                <span class="top3-label">{rank_emoji} {pred['name']}</span>
                 <div class="top3-bar-bg">
                     <div class="top3-bar-fill" style="width:{width_pct:.1f}%;background:{bar_color};"></div>
                 </div>
@@ -387,7 +559,7 @@ with col_right:
         if info:
             # ── History ──
             st.markdown("##### 📜 History")
-            history_text = info.get("history", "No history available.")
+            history_text = info.get("summary", info.get("history", "No history available."))
             short = truncate(history_text, 350)
 
             if st.session_state.show_full_history:
@@ -417,26 +589,25 @@ with col_right:
                 <div class="info-grid">
                     <div class="info-cell">
                         <div class="info-label">⏰ Timings</div>
-                        <div class="info-value">{info.get("timings", "N/A")}</div>
+                        <div class="info-value">{info.get("timings", "Sunrise to Sunset")}</div>
                     </div>
                     <div class="info-cell">
                         <div class="info-label">🎟️ Ticket Price</div>
-                        <div class="info-value">{info.get("ticket_price", "N/A")}</div>
+                        <div class="info-value">{info.get("ticket_price", "₹40 Indian / ₹600 Foreign")}</div>
                     </div>
                     <div class="info-cell">
                         <div class="info-label">📍 Address</div>
-                        <div class="info-value">{info.get("location", "Hampi, Karnataka")}</div>
+                        <div class="info-value">{info.get("location", "Hampi, Karnataka, India")}</div>
                     </div>
                     <div class="info-cell">
                         <div class="info-label">🌅 Best Time</div>
-                        <div class="info-value">{info.get("best_time", "N/A")}</div>
+                        <div class="info-value">{info.get("best_time", "Oct – Mar")}</div>
                     </div>
                 </div>
                 """,
                 unsafe_allow_html=True,
             )
 
-            # Tags
             tags = info.get("tags", [])
             if tags:
                 st.markdown(
@@ -446,7 +617,6 @@ with col_right:
 
             st.markdown("<br>", unsafe_allow_html=True)
 
-            # ── Action buttons ──
             btn_col1, btn_col2 = st.columns(2)
             with btn_col1:
                 maps_url = make_maps_url(info)
@@ -464,10 +634,9 @@ with col_right:
                 )
 
         else:
-            st.warning("⚠️ Monument metadata not found — try another image.")
+            st.warning("⚠️ Monument metadata not found in database.")
 
     elif not identify_clicked:
-        # Instructions placeholder
         st.markdown(
             """
             <div style="
@@ -484,11 +653,12 @@ with col_right:
                 </p>
                 <p style="font-size:0.9rem;line-height:1.6;opacity:0.8">
                     Upload a clear photo of any Hampi monument on the left,<br>
-                    then click <strong>Identify Monument</strong> to get instant results.
+                    select your <strong>Classification Mode</strong> from the sidebar,<br>
+                    then click <strong>Identify Monument</strong>.
                 </p>
                 <hr style="border-color:#e8d5bb;margin:1.2rem 0">
                 <p style="font-size:0.82rem;opacity:0.7">
-                    🏛️ Supports 10 monuments — Virupaksha Temple, Stone Chariot, 
+                    🏛️ Supports 10 monuments — Virupaksha Temple, Stone Chariot,
                     Lotus Mahal, Elephant Stables &amp; more
                 </p>
             </div>
